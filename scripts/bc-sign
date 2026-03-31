@@ -1,0 +1,83 @@
+#!/system/bin/sh
+# bc-sign — sign APKs with debug or release keystore
+# Usage: bc-sign <input.apk> [output.apk] [--release keystore.jks]
+
+CONFIG_DIR="/data/adb/buildchain"
+TBIN="/data/data/com.termux/files/usr/bin"
+DEBUG_KS="$CONFIG_DIR/debug.keystore"
+DEBUG_PASS="android"
+DEBUG_ALIAS="androiddebugkey"
+
+die() { echo "ERROR: $1"; exit 1; }
+
+# Create debug keystore if it doesn't exist
+ensure_debug_keystore() {
+  if [ ! -f "$DEBUG_KS" ]; then
+    echo "Creating debug keystore..."
+    "$TBIN/keytool" -genkey -v \
+      -keystore "$DEBUG_KS" \
+      -storepass "$DEBUG_PASS" \
+      -alias "$DEBUG_ALIAS" \
+      -keypass "$DEBUG_PASS" \
+      -keyalg RSA -keysize 2048 -validity 10000 \
+      -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || die "keytool failed — is Java installed? Run: buildchain setup"
+  fi
+}
+
+INPUT="$1"
+OUTPUT="${2:-$(echo "$INPUT" | sed 's/\.unsigned\.apk$/.apk/' | sed 's/\.aligned\.apk$/.apk/')}"
+
+[ -z "$INPUT" ] && { echo "Usage: bc-sign <input.apk> [output.apk] [--release keystore.jks]"; exit 1; }
+[ ! -f "$INPUT" ] && die "File not found: $INPUT"
+
+# Check for release signing
+if [ "$3" = "--release" ] && [ -n "$4" ]; then
+  KEYSTORE="$4"
+  [ ! -f "$KEYSTORE" ] && die "Keystore not found: $KEYSTORE"
+  echo "Signing with release key: $KEYSTORE"
+  read -p "Keystore password: " KS_PASS
+  read -p "Key alias: " KS_ALIAS
+  read -p "Key password: " KEY_PASS
+
+  "$TBIN/apksigner" sign \
+    --ks "$KEYSTORE" \
+    --ks-pass "pass:$KS_PASS" \
+    --ks-key-alias "$KS_ALIAS" \
+    --key-pass "pass:$KEY_PASS" \
+    --v1-signing-enabled true \
+    --v2-signing-enabled true \
+    --v3-signing-enabled true \
+    --out "$OUTPUT" \
+    "$INPUT" || die "apksigner failed"
+else
+  # Debug sign
+  ensure_debug_keystore
+
+  # Try apksigner first (from SDK), fall back to jarsigner
+  if command -v apksigner >/dev/null 2>&1 || [ -f "$TBIN/apksigner" ]; then
+    SIGNER=$(command -v apksigner 2>/dev/null || echo "$TBIN/apksigner")
+    "$SIGNER" sign \
+      --ks "$DEBUG_KS" \
+      --ks-pass "pass:$DEBUG_PASS" \
+      --ks-key-alias "$DEBUG_ALIAS" \
+      --key-pass "pass:$DEBUG_PASS" \
+      --out "$OUTPUT" \
+      "$INPUT" 2>/dev/null && echo "Signed (apksigner): $OUTPUT" && exit 0
+  fi
+
+  # Fallback to jarsigner
+  if [ -f "$TBIN/jarsigner" ]; then
+    cp "$INPUT" "$OUTPUT" 2>/dev/null
+    "$TBIN/jarsigner" \
+      -keystore "$DEBUG_KS" \
+      -storepass "$DEBUG_PASS" \
+      -keypass "$DEBUG_PASS" \
+      -signedjar "$OUTPUT" \
+      "$INPUT" \
+      "$DEBUG_ALIAS" 2>/dev/null && echo "Signed (jarsigner): $OUTPUT" && exit 0
+  fi
+
+  die "No signing tool found. Install Java: buildchain setup"
+fi
+
+echo "Signed: $OUTPUT"

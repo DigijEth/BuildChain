@@ -1,0 +1,157 @@
+#!/system/bin/sh
+# BuildChain WebUI — HTTP server on port 8089
+MODDIR=$(cat /data/adb/buildchain/moddir 2>/dev/null)
+WEBROOT="$MODDIR/webroot"
+CONFIG_DIR="/data/adb/buildchain"
+TOOLS="$MODDIR/tools"
+PORT=8089
+TERMUX_BIN="/data/data/com.termux/files/usr/bin"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [webui] $1"; }
+
+json_val() { echo "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"; }
+
+get_mime() {
+  case "$1" in *.html) echo "text/html";; *.css) echo "text/css";; *.js) echo "text/javascript";; *) echo "application/json";; esac
+}
+
+send_response() {
+  printf "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n%s" \
+    "$1" "$2" "${#3}" "$3"
+}
+
+send_file() {
+  [ -f "$1" ] && send_response "200 OK" "$(get_mime "$1")" "$(cat "$1")" || send_response "404 Not Found" "text/plain" "Not Found"
+}
+
+# API: get full environment status
+api_status() {
+  cat "$CONFIG_DIR/environment.json" 2>/dev/null || echo '{"error":"not detected yet"}'
+}
+
+# API: list all tools and their paths/status
+api_tools() {
+  local result="["
+  local first=1
+
+  for tool in aapt aapt2 aidl dexdump zipalign split-select; do
+    local path="$TOOLS/build-tools/$tool"
+    local exists="false"; [ -f "$path" ] && exists="true"
+    local size=$(stat -c%s "$path" 2>/dev/null || echo 0)
+    [ "$first" = "1" ] && first=0 || result="$result,"
+    result="$result{\"name\":\"$tool\",\"category\":\"build-tools\",\"path\":\"$path\",\"exists\":$exists,\"size\":$size}"
+  done
+
+  for tool in adb fastboot sqlite3 e2fsdroid etc1tool mke2fs make_f2fs sload_f2fs hprof-conv; do
+    local path="$TOOLS/platform-tools/$tool"
+    local exists="false"; [ -f "$path" ] && exists="true"
+    local size=$(stat -c%s "$path" 2>/dev/null || echo 0)
+    result="$result,{\"name\":\"$tool\",\"category\":\"platform-tools\",\"path\":\"$path\",\"exists\":$exists,\"size\":$size}"
+  done
+
+  result="$result,{\"name\":\"busybox\",\"category\":\"system\",\"path\":\"$TOOLS/busybox\",\"exists\":$([ -f "$TOOLS/busybox" ] && echo true || echo false),\"size\":$(stat -c%s "$TOOLS/busybox" 2>/dev/null || echo 0)}"
+
+  # Termux packages
+  for tool in java javac python3 kotlin kotlinc gradle git cmake make clang gcc g++ d8 apksigner jarsigner keytool; do
+    local tpath="$TERMUX_BIN/$tool"
+    local exists="false"; [ -f "$tpath" ] && exists="true"
+    result="$result,{\"name\":\"$tool\",\"category\":\"termux\",\"path\":\"$tpath\",\"exists\":$exists,\"size\":0}"
+  done
+
+  echo "${result}]"
+}
+
+# API: get current PATH
+api_paths() {
+  local syspath=$(echo "$PATH" | tr ':' '\n')
+  local result="["
+  local first=1
+  for p in $syspath; do
+    [ "$first" = "1" ] && first=0 || result="$result,"
+    result="$result\"$p\""
+  done
+  echo "${result}]"
+}
+
+# API: run buildchain test
+api_test() {
+  local result=""
+  result=$(sh "$MODDIR/scripts/buildchain" test 2>&1)
+  result=$(echo "$result" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|' | sed 's/|/\\n/g')
+  echo "{\"output\":\"$result\"}"
+}
+
+# API: run setup (returns instructions since it needs Termux context)
+api_setup_status() {
+  local missing=""
+  for pkg in java python3 kotlinc gradle git cmake clang; do
+    [ ! -f "$TERMUX_BIN/$pkg" ] && missing="$missing $pkg"
+  done
+  if [ -z "$missing" ]; then
+    echo '{"complete":true,"missing":[]}'
+  else
+    missing=$(echo "$missing" | sed 's/^ //' | sed 's/ /","/g')
+    echo "{\"complete\":false,\"missing\":[\"$missing\"]}"
+  fi
+}
+
+# API: get buildchain log
+api_log() {
+  local lines="${1:-50}"
+  local content=$(tail -n "$lines" "$CONFIG_DIR/buildchain.log" 2>/dev/null)
+  content=$(echo "$content" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|' | sed 's/|/\\n/g')
+  echo "{\"log\":\"$content\"}"
+}
+
+# API: busybox applet list
+api_busybox() {
+  local applets=$("$TOOLS/busybox" --list 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  local count=$("$TOOLS/busybox" --list 2>/dev/null | wc -l)
+  local version=$("$TOOLS/busybox" 2>&1 | head -1 | sed 's/"/\\"/g')
+  echo "{\"version\":\"$version\",\"count\":$count,\"applets\":\"$applets\"}"
+}
+
+handle_request() {
+  local method path body content_length
+
+  read -r request_line
+  method=$(echo "$request_line" | awk '{print $1}')
+  path=$(echo "$request_line" | awk '{print $2}' | cut -d'?' -f1)
+
+  while read -r header; do
+    header=$(echo "$header" | tr -d '\r')
+    [ -z "$header" ] && break
+    case "$header" in Content-Length:*) content_length=$(echo "$header" | awk '{print $2}') ;; esac
+  done
+
+  body=""
+  if [ "$method" = "POST" ] && [ -n "$content_length" ] && [ "$content_length" -gt 0 ] 2>/dev/null; then
+    body=$(dd bs=1 count="$content_length" 2>/dev/null)
+  fi
+
+  [ "$method" = "OPTIONS" ] && { send_response "200 OK" "text/plain" ""; return; }
+
+  case "$method $path" in
+    "GET /")           send_file "$WEBROOT/index.html" ;;
+    "GET /css/"*|"GET /js/"*) send_file "$WEBROOT$path" ;;
+    "GET /api/status")  send_response "200 OK" "application/json" "$(api_status)" ;;
+    "GET /api/tools")   send_response "200 OK" "application/json" "$(api_tools)" ;;
+    "GET /api/paths")   send_response "200 OK" "application/json" "$(api_paths)" ;;
+    "GET /api/test")    send_response "200 OK" "application/json" "$(api_test)" ;;
+    "GET /api/setup")   send_response "200 OK" "application/json" "$(api_setup_status)" ;;
+    "GET /api/log")     send_response "200 OK" "application/json" "$(api_log)" ;;
+    "GET /api/busybox") send_response "200 OK" "application/json" "$(api_busybox)" ;;
+    "POST /api/redetect")
+      sh "$MODDIR/service.sh" &
+      send_response "200 OK" "application/json" '{"ok":true}'
+      ;;
+    *) send_response "404 Not Found" "application/json" '{"error":"not found"}' ;;
+  esac
+}
+
+log "Starting on port $PORT"
+while true; do
+  handle_request | busybox nc -ll -p "$PORT" -s 127.0.0.1 2>/dev/null \
+    || handle_request | toybox nc -L -p "$PORT" -s 127.0.0.1 2>/dev/null \
+    || { log "ERROR: No listener"; exit 1; }
+done

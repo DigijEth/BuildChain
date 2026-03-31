@@ -1,0 +1,91 @@
+#!/system/bin/sh
+# BuildChain Setup — installs Java, Python, Kotlin, Gradle, and dev tools via Termux
+# Must be run from within Termux (or any shell with access to pkg/apt)
+
+TERMUX_PREFIX="/data/data/com.termux/files/usr"
+TERMUX_BIN="$TERMUX_PREFIX/bin"
+
+echo "=== BuildChain Setup ==="
+echo ""
+
+# Check if we're in a Termux-capable environment
+if [ ! -f "$TERMUX_BIN/pkg" ] && ! command -v pkg >/dev/null 2>&1; then
+  echo "ERROR: Termux pkg not found."
+  echo "This script must be run inside Termux or after Termux is installed."
+  echo ""
+  echo "Install Termux from F-Droid or GitHub, open it once, then run this again."
+  exit 1
+fi
+
+PKG="pkg"
+command -v pkg >/dev/null 2>&1 || PKG="$TERMUX_BIN/pkg"
+
+echo "[1/7] Updating package database..."
+$PKG update -y 2>&1 | tail -3
+
+echo ""
+echo "[2/7] Installing Java (OpenJDK 21)..."
+$PKG install -y openjdk-21 2>&1 | tail -3
+echo "  $(java -version 2>&1 | head -1)"
+
+echo ""
+echo "[3/7] Installing Python..."
+$PKG install -y python 2>&1 | tail -3
+echo "  $(python3 --version 2>&1)"
+
+echo ""
+echo "[4/7] Installing Kotlin..."
+$PKG install -y kotlin 2>&1 | tail -3
+echo "  $(kotlinc -version 2>&1 | head -1)"
+
+echo ""
+echo "[5/7] Installing Gradle..."
+$PKG install -y gradle 2>&1 | tail -3
+echo "  $(gradle --version 2>&1 | grep 'Gradle ' | head -1)"
+
+echo ""
+echo "[6/7] Installing build essentials (git, cmake, make, clang, ndk tools)..."
+$PKG install -y git cmake make clang ndk-sysroot binutils 2>&1 | tail -3
+
+echo ""
+echo "[7/7] Installing extra tools (curl, wget, zip, unzip, tar, openssh, jq)..."
+$PKG install -y curl wget zip unzip tar openssh jq 2>&1 | tail -3
+
+echo ""
+echo "=== Setting up Android SDK structure ==="
+ANDROID_HOME="/data/data/com.termux/files/home/android-sdk"
+mkdir -p "$ANDROID_HOME/build-tools/35.0.2"
+mkdir -p "$ANDROID_HOME/platform-tools"
+
+# Symlink our build tools into the SDK structure so Gradle/AGP finds them
+MODDIR=$(cat /data/adb/buildchain/moddir 2>/dev/null)
+if [ -n "$MODDIR" ]; then
+  for tool in aapt aapt2 aidl dexdump zipalign split-select; do
+    ln -sf "$MODDIR/tools/build-tools/$tool" "$ANDROID_HOME/build-tools/35.0.2/$tool" 2>/dev/null
+  done
+  for tool in adb fastboot sqlite3; do
+    ln -sf "$MODDIR/tools/platform-tools/$tool" "$ANDROID_HOME/platform-tools/$tool" 2>/dev/null
+  done
+  echo "  SDK structure created at $ANDROID_HOME"
+fi
+
+echo ""
+echo "=== Setup Complete ==="
+echo ""
+echo "Installed:"
+echo "  Java:    $(java -version 2>&1 | head -1)"
+echo "  Python:  $(python3 --version 2>&1)"
+echo "  Kotlin:  $(kotlinc -version 2>&1 | head -1)"
+echo "  Gradle:  $(gradle --version 2>&1 | grep 'Gradle ' | head -1)"
+echo "  Git:     $(git --version 2>&1)"
+echo "  CMake:   $(cmake --version 2>&1 | head -1)"
+echo "  Clang:   $(clang --version 2>&1 | head -1)"
+echo ""
+echo "Build tools: aapt2, aidl, zipalign (API 35)"
+echo "BusyBox:     $(busybox 2>&1 | head -1)"
+echo ""
+echo "Run 'buildchain status' to verify everything."
+echo "Run 'buildchain test' to test all tools."
+echo ""
+echo "Source the environment in your shell:"
+echo "  source /data/adb/buildchain/env.sh"

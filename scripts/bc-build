@@ -1,0 +1,168 @@
+#!/system/bin/sh
+# bc-build — compile Android project from source on-device
+# Supports: single Java/Kotlin file, Gradle project, or raw aapt2+javac+d8 pipeline
+#
+# Usage:
+#   bc-build <file.java>              Compile single Java file to APK
+#   bc-build <file.kt>                Compile single Kotlin file to APK
+#   bc-build <project_dir>            Run gradle assembleDebug
+#   bc-build --raw <src_dir> <out>    Manual aapt2+javac+d8 pipeline
+
+CONFIG_DIR="/data/adb/buildchain"
+MODDIR=$(cat "$CONFIG_DIR/moddir" 2>/dev/null)
+TOOLS="$MODDIR/tools"
+AAPT2="$TOOLS/build-tools/aapt2"
+AIDL="$TOOLS/build-tools/aidl"
+ZIPALIGN="$TOOLS/build-tools/zipalign"
+TBIN="/data/data/com.termux/files/usr/bin"
+ANDROID_JAR="/data/data/com.termux/files/home/android-sdk/platforms/android-35/android.jar"
+
+# Fallback android.jar location
+[ ! -f "$ANDROID_JAR" ] && ANDROID_JAR="/system/framework/framework.jar"
+
+die() { echo "ERROR: $1"; exit 1; }
+
+build_single_java() {
+  local src="$1"
+  local name=$(basename "$src" .java)
+  local outdir="${2:-./build}"
+
+  echo "=== Building $name.java ==="
+  mkdir -p "$outdir/classes" "$outdir/dex" "$outdir/apk"
+
+  echo "[1/5] Compiling Java..."
+  "$TBIN/javac" -source 11 -target 11 -cp "$ANDROID_JAR" -d "$outdir/classes" "$src" || die "javac failed"
+
+  echo "[2/5] Converting to DEX..."
+  "$TBIN/d8" --min-api 28 --output "$outdir/dex/" "$outdir/classes"/*.class 2>/dev/null \
+    || "$TBIN/java" -jar "$TBIN/../share/d8/d8.jar" --min-api 28 --output "$outdir/dex/" "$outdir/classes"/*.class \
+    || die "d8/dex conversion failed"
+
+  echo "[3/5] Packaging APK..."
+  # Create minimal AndroidManifest.xml
+  cat > "$outdir/AndroidManifest.xml" << MANIFEST
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.buildchain.$name">
+    <application android:label="$name">
+        <activity android:name=".$name" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+MANIFEST
+
+  "$AAPT2" link -o "$outdir/apk/$name.unsigned.apk" \
+    --manifest "$outdir/AndroidManifest.xml" \
+    -I "$ANDROID_JAR" 2>/dev/null || die "aapt2 link failed"
+
+  # Add DEX to APK
+  cd "$outdir/dex" && zip -u "../apk/$name.unsigned.apk" classes.dex 2>/dev/null && cd - >/dev/null
+
+  echo "[4/5] Aligning..."
+  "$ZIPALIGN" -f 4 "$outdir/apk/$name.unsigned.apk" "$outdir/apk/$name.aligned.apk" || die "zipalign failed"
+
+  echo "[5/5] Signing..."
+  bc-sign "$outdir/apk/$name.aligned.apk" "$outdir/$name.apk"
+
+  echo ""
+  echo "Output: $outdir/$name.apk"
+  ls -la "$outdir/$name.apk" 2>/dev/null
+}
+
+build_single_kotlin() {
+  local src="$1"
+  local name=$(basename "$src" .kt)
+  local outdir="${2:-./build}"
+
+  echo "=== Building $name.kt ==="
+  mkdir -p "$outdir/classes" "$outdir/dex" "$outdir/apk"
+
+  echo "[1/5] Compiling Kotlin..."
+  "$TBIN/kotlinc" -cp "$ANDROID_JAR" -d "$outdir/classes" "$src" || die "kotlinc failed"
+
+  echo "[2/5] Converting to DEX..."
+  find "$outdir/classes" -name "*.class" | xargs "$TBIN/d8" --min-api 28 --output "$outdir/dex/" 2>/dev/null \
+    || die "d8 failed"
+
+  echo "[3/5] Packaging..."
+  cat > "$outdir/AndroidManifest.xml" << MANIFEST
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.buildchain.$name">
+    <application android:label="$name"/>
+</manifest>
+MANIFEST
+
+  "$AAPT2" link -o "$outdir/apk/$name.unsigned.apk" \
+    --manifest "$outdir/AndroidManifest.xml" \
+    -I "$ANDROID_JAR" 2>/dev/null || die "aapt2 link failed"
+
+  cd "$outdir/dex" && zip -u "../apk/$name.unsigned.apk" classes.dex 2>/dev/null && cd - >/dev/null
+
+  echo "[4/5] Aligning..."
+  "$ZIPALIGN" -f 4 "$outdir/apk/$name.unsigned.apk" "$outdir/apk/$name.aligned.apk"
+
+  echo "[5/5] Signing..."
+  bc-sign "$outdir/apk/$name.aligned.apk" "$outdir/$name.apk"
+
+  echo ""
+  echo "Output: $outdir/$name.apk"
+}
+
+build_gradle_project() {
+  local projdir="$1"
+  echo "=== Building Gradle project: $projdir ==="
+
+  if [ ! -f "$projdir/build.gradle" ] && [ ! -f "$projdir/build.gradle.kts" ]; then
+    die "No build.gradle found in $projdir"
+  fi
+
+  cd "$projdir"
+
+  # Set ANDROID_HOME for Gradle
+  export ANDROID_HOME="/data/data/com.termux/files/home/android-sdk"
+  export ANDROID_SDK_ROOT="$ANDROID_HOME"
+
+  if [ -f "./gradlew" ]; then
+    chmod +x ./gradlew
+    ./gradlew assembleDebug || die "Gradle build failed"
+  elif command -v gradle >/dev/null 2>&1; then
+    gradle assembleDebug || die "Gradle build failed"
+  else
+    die "No gradlew and gradle not installed. Run: buildchain setup"
+  fi
+
+  echo ""
+  echo "Output APKs:"
+  find . -name "*.apk" -path "*/build/outputs/*" 2>/dev/null
+}
+
+# Main
+case "$1" in
+  --help|-h|"")
+    echo "bc-build — compile Android projects on-device"
+    echo ""
+    echo "Usage:"
+    echo "  bc-build MyApp.java           Compile Java to APK"
+    echo "  bc-build MyApp.kt             Compile Kotlin to APK"
+    echo "  bc-build ./my-project/        Run Gradle assembleDebug"
+    echo "  bc-build MyApp.java ./out/    Specify output directory"
+    ;;
+  *.java)
+    build_single_java "$1" "$2"
+    ;;
+  *.kt)
+    build_single_kotlin "$1" "$2"
+    ;;
+  *)
+    if [ -d "$1" ]; then
+      build_gradle_project "$1"
+    else
+      die "Unknown input: $1 (expected .java, .kt, or directory)"
+    fi
+    ;;
+esac

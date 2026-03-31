@@ -1,0 +1,6 @@
+id=buildchain
+name=BuildChain
+version=v1.0.0
+versionCode=1
+author=snake
+description=On-device Android build toolchain. aapt2/aidl/zipalign (API 35), BusyBox, Python, Java, Kotlin, Gradle via Termux. Turns any phone into a native compiler. WebUI for toolchain management.

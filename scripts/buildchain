@@ -1,0 +1,164 @@
+#!/system/bin/sh
+# BuildChain — main CLI tool
+# Usage: buildchain <command> [args]
+
+CONFIG_DIR="/data/adb/buildchain"
+MODDIR=$(cat "$CONFIG_DIR/moddir" 2>/dev/null)
+TOOLS="$MODDIR/tools"
+VERSION="1.0.0"
+
+usage() {
+  echo "BuildChain v$VERSION — On-device Android build toolchain"
+  echo ""
+  echo "Usage: buildchain <command>"
+  echo ""
+  echo "Commands:"
+  echo "  status      Show installed toolchain components"
+  echo "  setup       Install Java, Python, Kotlin, Gradle via Termux"
+  echo "  env         Print current build environment"
+  echo "  paths       Show all tool paths"
+  echo "  test        Test all build tools"
+  echo "  version     Show version info"
+  echo ""
+  echo "Build helpers:"
+  echo "  bc-build    Compile an Android project"
+  echo "  bc-sign     Sign an APK with debug or release key"
+  echo ""
+  echo "WebUI: http://localhost:8089"
+}
+
+cmd_status() {
+  echo "=== BuildChain Status ==="
+  echo ""
+
+  echo "[Build Tools — API 35]"
+  for tool in aapt aapt2 aidl dexdump zipalign split-select; do
+    local path="$TOOLS/build-tools/$tool"
+    if [ -f "$path" ]; then
+      echo "  [OK] $tool"
+    else
+      echo "  [--] $tool (missing)"
+    fi
+  done
+
+  echo ""
+  echo "[Platform Tools]"
+  for tool in adb fastboot sqlite3 e2fsdroid etc1tool mke2fs make_f2fs sload_f2fs; do
+    local path="$TOOLS/platform-tools/$tool"
+    if [ -f "$path" ]; then
+      echo "  [OK] $tool"
+    else
+      echo "  [--] $tool (missing)"
+    fi
+  done
+
+  echo ""
+  echo "[BusyBox]"
+  if [ -f "$TOOLS/busybox" ]; then
+    local applets=$("$TOOLS/busybox" --list 2>/dev/null | wc -l)
+    echo "  [OK] busybox ($applets applets)"
+  else
+    echo "  [--] busybox (missing)"
+  fi
+
+  echo ""
+  echo "[Termux Packages]"
+  local tbin="/data/data/com.termux/files/usr/bin"
+  for pkg in java javac python3 kotlin kotlinc gradle git cmake make gcc g++ clang; do
+    if [ -f "$tbin/$pkg" ]; then
+      echo "  [OK] $pkg"
+    else
+      echo "  [--] $pkg (run: buildchain setup)"
+    fi
+  done
+
+  echo ""
+  echo "[Android Environment]"
+  echo "  Device:  $(getprop ro.product.model)"
+  echo "  Android: $(getprop ro.build.version.release) (API $(getprop ro.build.version.sdk))"
+  echo "  Arch:    $(uname -m)"
+  echo "  Kernel:  $(uname -r)"
+}
+
+cmd_env() {
+  [ -f "$CONFIG_DIR/env.sh" ] && cat "$CONFIG_DIR/env.sh" || echo "Environment not configured. Run: buildchain setup"
+}
+
+cmd_paths() {
+  echo "=== Tool Paths ==="
+  echo "Build tools:    $TOOLS/build-tools/"
+  echo "Platform tools: $TOOLS/platform-tools/"
+  echo "BusyBox:        $TOOLS/busybox"
+  echo "Config:         $CONFIG_DIR/"
+  echo "Module:         $MODDIR"
+  echo ""
+  echo "=== Resolved Binaries ==="
+  for tool in aapt2 aidl zipalign java javac python3 kotlinc gradle git make cmake clang busybox; do
+    local p=$(which "$tool" 2>/dev/null)
+    [ -n "$p" ] && echo "  $tool -> $p" || echo "  $tool -> (not found)"
+  done
+}
+
+cmd_test() {
+  echo "=== Testing Build Tools ==="
+  echo ""
+
+  echo "aapt2:"
+  "$TOOLS/build-tools/aapt2" version 2>&1 && echo "  PASS" || echo "  FAIL"
+  echo ""
+
+  echo "aidl:"
+  "$TOOLS/build-tools/aidl" --version 2>&1 && echo "  PASS" || echo "  FAIL"
+  echo ""
+
+  echo "zipalign:"
+  "$TOOLS/build-tools/zipalign" 2>&1 | head -1 && echo "  PASS" || echo "  FAIL"
+  echo ""
+
+  echo "dexdump:"
+  "$TOOLS/build-tools/dexdump" 2>&1 | head -1 && echo "  PASS" || echo "  FAIL"
+  echo ""
+
+  echo "busybox:"
+  "$TOOLS/busybox" --help 2>&1 | head -1 && echo "  PASS" || echo "  FAIL"
+  echo ""
+
+  # Test Termux tools if available
+  local tbin="/data/data/com.termux/files/usr/bin"
+  if [ -f "$tbin/java" ]; then
+    echo "java:"
+    "$tbin/java" -version 2>&1 | head -1
+    echo ""
+  fi
+  if [ -f "$tbin/python3" ]; then
+    echo "python:"
+    "$tbin/python3" --version 2>&1
+    echo ""
+  fi
+  if [ -f "$tbin/kotlinc" ]; then
+    echo "kotlin:"
+    "$tbin/kotlinc" -version 2>&1 | head -1
+    echo ""
+  fi
+  if [ -f "$tbin/gradle" ]; then
+    echo "gradle:"
+    "$tbin/gradle" --version 2>&1 | grep "Gradle " | head -1
+    echo ""
+  fi
+}
+
+cmd_version() {
+  echo "BuildChain v$VERSION"
+  echo "Build tools: API 35 (35.0.2)"
+  echo "Target: $(getprop ro.product.model) / Android $(getprop ro.build.version.release)"
+}
+
+case "$1" in
+  status)  cmd_status ;;
+  setup)   sh "$MODDIR/scripts/buildchain-setup" ;;
+  env)     cmd_env ;;
+  paths)   cmd_paths ;;
+  test)    cmd_test ;;
+  version) cmd_version ;;
+  *)       usage ;;
+esac
