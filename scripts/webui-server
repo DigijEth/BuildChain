@@ -150,8 +150,31 @@ handle_request() {
 }
 
 log "Starting on port $PORT"
+
+# Find a working netcat
+NC=""
+if command -v busybox >/dev/null 2>&1 && busybox nc --help 2>&1 | grep -q "\-ll"; then
+  NC="busybox nc"
+elif [ -f "$MODDIR/tools/busybox" ]; then
+  NC="$MODDIR/tools/busybox nc"
+elif command -v toybox >/dev/null 2>&1; then
+  NC="toybox nc"
+fi
+
+if [ -z "$NC" ]; then
+  log "ERROR: No working netcat found"
+  exit 1
+fi
+
+log "Using: $NC"
+
 while true; do
-  handle_request | busybox nc -ll -p "$PORT" -s 127.0.0.1 2>/dev/null \
-    || handle_request | toybox nc -L -p "$PORT" -s 127.0.0.1 2>/dev/null \
-    || { log "ERROR: No listener"; exit 1; }
+  # Create a FIFO for bidirectional communication
+  FIFO="/data/adb/buildchain/webui.fifo"
+  rm -f "$FIFO"
+  mkfifo "$FIFO"
+
+  # nc reads from client, pipes to handle_request, response goes back via FIFO
+  handle_request < "$FIFO" | $NC -l -p "$PORT" -s 127.0.0.1 > "$FIFO" 2>/dev/null
+  rm -f "$FIFO"
 done
